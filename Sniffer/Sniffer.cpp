@@ -4,41 +4,8 @@
 #include "stdafx.h"
 #include "iphdr.h"
 
-std::vector< std::string > getInterfaces()
-{
-	std::vector< std::string > lst;
-	try
-	{
-		char     hostname[MAX_PATH];
-		HOSTENT *hostaddr;
-		int      adapter_idx = 0;
-		struct sockaddr_in   address;
-
-		int ret = gethostname( hostname, sizeof( hostname ) );
-		if( ret != 0 )
-			return lst;
-
-		hostaddr = gethostbyname( hostname );
-		if( hostaddr == nullptr )
-			return lst;
-
-		while( hostaddr->h_addr_list[adapter_idx] )
-		{
-			memcpy( &address.sin_addr, hostaddr->h_addr_list[adapter_idx], hostaddr->h_length );
-
-			lst.push_back( inet_ntoa( address.sin_addr ) );
-			adapter_idx++;
-		}
-	}
-	catch( ... )
-	{
-		puts( "get interface failed." );
-	}
-
-	return lst;
-}
-
 typedef void( *prase_fn )( const char* packet, size_t size );
+typedef int(*pfn_writelog)(const char* fmt, ...);
 
 void prase_packet( const char* packet, size_t size );
 void prase_ip( const char* packet, size_t size );
@@ -49,8 +16,50 @@ void prase_msg( const char* packet, size_t size );
 
 unsigned int	addr = INADDR_ANY;
 unsigned short	port = INADDR_ANY;
-char *msgbuf = nullptr;
-unsigned int msglen = 0;
+
+IPV4_HDR	ip4;
+TCP_HDR		tcp;
+
+char *	msgbuf = nullptr;
+size_t	msglen = 0;
+
+std::unordered_map< TCP_CONNECTION, PTCP_SESSION, std::_Bitwise_hash< TCP_CONNECTION > > sessions;
+
+PTCP_SESSION session = nullptr; // 当前的Session对象
+
+std::vector< std::string > getInterfaces()
+{
+	std::vector< std::string > lst;
+	try
+	{
+		char     hostname[MAX_PATH];
+		HOSTENT *hostaddr;
+		int      adapter_idx = 0;
+		struct sockaddr_in   address;
+
+		int ret = gethostname(hostname, sizeof(hostname));
+		if (ret != 0)
+			return lst;
+
+		hostaddr = gethostbyname(hostname);
+		if (hostaddr == nullptr)
+			return lst;
+
+		while (hostaddr->h_addr_list[adapter_idx])
+		{
+			memcpy(&address.sin_addr, hostaddr->h_addr_list[adapter_idx], hostaddr->h_length);
+
+			lst.push_back(inet_ntoa(address.sin_addr));
+			adapter_idx++;
+		}
+	}
+	catch (...)
+	{
+		puts("get interface failed.");
+	}
+
+	return lst;
+}
 
 int main( int argc, char* argv[] )
 {
@@ -127,9 +136,6 @@ int main( int argc, char* argv[] )
 		WSACleanup();
 		return false;
 	}
-	printf( "Binding to: " );
-	//PrintAddress((SOCKADDR *)&g_saLocalInterface, sizeof(g_saLocalInterface));
-	printf( "\n" );
 
 	//
 	// Set the SIO_RCVALLxxx ioctl
@@ -155,7 +161,9 @@ int main( int argc, char* argv[] )
 		return false;
 	}
 
-	msgbuf = (char*)malloc( 1024 * 1024 * 16 );
+	msgbuf = (char*)malloc( 1024 * 1024 * 64 );
+
+	puts("start working...");
 	while( true )
 	{
 		wbuf.len = sizeof(rcvbuf);
@@ -233,43 +241,99 @@ const char* search_string( int value, value_string* table )
 
 	return "";
 }
+
+static unsigned char szOutput[1024 * 1024 * 128];
+static unsigned char *pOutput = nullptr;
+int Output(const char* fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int cnt = _vsnprintf_s((char*)pOutput, szOutput + sizeof(szOutput)-pOutput, szOutput + sizeof(szOutput)-pOutput, fmt, ap);
+	if (cnt > 0)
+		pOutput += cnt;
+
+	return cnt;
+}
+
+void PrintRawDataLine(const unsigned char *data, int length, int width, pfn_writelog writelog)
+{
+	for (int i = 0; i < width; ++i)
+	{
+		if (i < length)
+			writelog("%02X ", data[i]);
+		else
+			writelog("   ");
+	}
+
+	writelog("[");
+
+	for (int i = 0; i < width; ++i)
+	{
+		if (i < length)
+			writelog("%c", isprint(data[i]) ? data[i] : '.');
+		else
+			writelog(" ");
+	}
+
+	writelog("]\n");
+}
+
+void PrintRawData( const unsigned char *data, int length, int width, pfn_writelog writelog)
+{
+	writelog("-------------Data Begins-------------\n");
+	while (length > 0)
+	{
+		PrintRawDataLine(data, min(length, width), width, writelog);
+		if (length < width)
+		{
+			data += length;
+			length = 0;
+		}
+		else
+		{
+			data += width;
+			length -= width;
+		}
+
+	}
+}
+
 void prase_ip( const char* packet, size_t size )
 {
 	// Check the IP version
-	int ip_version	= HI_BYTE( *packet );
-	int ip_header	= LO_BYTE( *packet ) * 4;
-	puts( "=======================================================" );
-	if( ip_version == 4 )
+	// Verify the buffer is large enough
+	if (size  < sizeof(IPV4_HDR))
+		return;
+
+	ip4 = *(IPV4_HDR *)packet;
+
+	if (ip4.version == 4)
 	{
-
-		// Verify the buffer is large enough
-		if( size  < sizeof( IPV4_HDR ) )
-			return;
-
-		IPV4_HDR header = *(IPV4_HDR *)packet;
-
-		printf( "IPV%d\n", ip_version );
-		puts( "=======================================================" );
-
-		printf( "tos : %8d | tol : %8d | unq : %08x | offset : %d\n", 
-			header.ip_tos, header.ip_totallength, header.ip_id, header.ip_offset );
-
-		printf( "ttl : %8d | ptl : %8s | cks : %08x \n",
-			header.ip_ttl, 
-			search_string( header.ip_protocol, _Protocal ), 
-			header.ip_checksum );
-
-		IN_ADDR src, dst;
-		src.S_un.S_addr = header.ip_srcaddr;
-		dst.S_un.S_addr = header.ip_dstaddr;
-
-		printf( "src(%s) <==> dst(%s)\n", inet_ntoa( src ), inet_ntoa( dst ) );
-
-		switch( header.ip_protocol )
+		switch( ip4.proto )
 		{
 		case IPPROTO_TCP:
-			puts( "====================== TCP =============================" );
-			prase_tcp( packet + ip_header, size - ip_header );
+			puts("=======================================================");
+			printf("IPV%d\n", ip4.version);
+			puts("=======================================================");
+
+			printf("tos : %8d | tol : %8d | unq : %08x | offset : %d\n",
+				ip4.tos, ip4.totlen, ip4.id, ip4.frag_off);
+
+			printf("ttl : %8d | ptl : %8s | cks : %08x \n",
+				ip4.ttl,
+				search_string(ip4.proto, _Protocal),
+				ip4.checksum);
+
+			IN_ADDR src, dst;
+			src.S_un.S_addr = ip4.src_addr;
+			dst.S_un.S_addr = ip4.dst_addr;
+			char src_addr[32];
+			char dst_addr[32];
+			strcpy_s(src_addr, inet_ntoa(src));
+			strcpy_s(dst_addr, inet_ntoa(dst));
+			printf("src(%s) <==> dst(%s)\n", src_addr, dst_addr);
+			puts("====================== TCP =============================");
+			prase_tcp(packet + ip4.ihl * 4, size - ip4.ihl * 4);
 			break;
 		case IPPROTO_UDP:
 			break;
@@ -279,50 +343,162 @@ void prase_ip( const char* packet, size_t size )
 
 void prase_tcp( const char* packet, size_t size )
 {
-	TCP_HDR tcp = *(TCP_HDR*)packet;
-	printf( "src(%d) <==> dst(%d)\n", ntohs( tcp.src_port ), ntohs( tcp.dst_port ) );
-	printf( "seq : %8d | ack : %8d | " );
+	tcp = *(TCP_HDR*)packet;
 
-	prase_pkg( packet + sizeof( tcp ), size - sizeof( tcp ), prase_msg );
+	tcp.src_port = ntohs(tcp.src_port);
+	tcp.dst_port = ntohs(tcp.dst_port);
+	tcp.seq_num = ntohl(tcp.seq_num);
+	tcp.ack_num = ntohl(tcp.ack_num);
+	tcp.chk_sum = ntohs(tcp.chk_sum);
+
+	size_t tcp_hdrlen = tcp.thl * 4;
+
+	if (port != 0 && tcp.src_port != port)
+		return;
+
+	printf("src(%d) <==> dst(%d)\n", tcp.src_port, tcp.dst_port);
+	printf("seq : %08x | ack : %08x\n", tcp.seq_num, tcp.ack_num);
+
+	pOutput = szOutput;
+	PrintRawData((unsigned char*)packet + tcp_hdrlen, size - tcp_hdrlen, 16, Output );
+	puts((char*)szOutput);
+
+	TCP_CONNECTION Conn;
+	Conn.src.addr = ip4.src_addr;
+	Conn.src.port = tcp.src_port;
+
+	Conn.dst.addr = ip4.dst_addr;
+	Conn.dst.port = tcp.dst_port;
+
+	auto iter = sessions.find(Conn);
+	if (iter == sessions.end())
+	{
+		session = (PTCP_SESSION)malloc( sizeof(TCP_SESSION) );
+		memset(session, 0, _msize(session));
+		sessions[Conn] = session;
+	}
+	else
+	{
+		session = iter->second;
+	}
+
+	switch (tcp.flag)
+	{
+	case TH_SYN:
+		session->state = SYN_SENT;
+		break;
+	case TH_SYN | TH_ACK:
+		session->state = ESTABLISHED;
+		break;
+	case TH_SYN | TH_RST:
+		break;
+	case TH_ACK:
+		break;
+	case TH_FIN:
+		break;
+	case TH_PUSH:
+	case TH_PUSH | TH_ACK:
+		if (tcp.seq_num == 0 )
+			session->seq_num = tcp.seq_num;
+
+		if (tcp.seq_num == session->seq_num)
+		{
+			++session->seq_num;
+			prase_pkg(packet + tcp_hdrlen, size - tcp_hdrlen, prase_msg);
+
+			PTCP_UNORDER cursor = session->unorder_list;
+			PTCP_UNORDER fefefe = session->unorder_list;
+			while (cursor != nullptr)
+			{
+				if (cursor->tcp.seq_num != tcp.seq_num)
+					break;
+
+				++session->seq_num;
+				prase_pkg(cursor->data, cursor->len, prase_msg);
+
+				cursor = cursor->next;
+
+				free(fefefe);
+				fefefe = cursor;
+			}
+		}
+		else
+		{
+			PTCP_UNORDER cursor = session->unorder_list;
+
+			// create new unorder packet
+			size_t datalen = size - tcp_hdrlen;
+			if (datalen > 0)
+			{
+				PTCP_UNORDER newest = (PTCP_UNORDER)malloc(sizeof(TCP_UNORDER)+datalen);
+				newest->len = datalen;
+				newest->next = nullptr;
+				newest->tcp = tcp;
+				memcpy(newest->data, packet + tcp_hdrlen, size - tcp_hdrlen);
+
+				// insert order by asc
+				if (cursor == nullptr)
+				{
+					session->unorder_list = newest;
+				}
+				else if (cursor->tcp.seq_num > newest->tcp.seq_num)
+				{
+					newest->next = cursor;
+					session->unorder_list = newest;
+				}
+				else while (cursor)
+				{
+					if (cursor->next == nullptr || cursor->next->tcp.seq_num > newest->tcp.seq_num)
+					{
+						newest->next = cursor->next;
+						cursor->next = newest;
+						break;
+					}
+					cursor = cursor->next;
+				}
+			}
+		}
+		break;
+	}
 }
 
 void prase_pkg( const char* packet, size_t size, prase_fn decode )
 {
-	memcpy( msgbuf + msglen, packet, size );
-	msglen += size;
+	memcpy( session->msgbuf + session->msglen, packet, size);
+	session->msglen += size;
 
-	if( msglen >= sizeof( unsigned short ) )
+	if (session->msglen >= sizeof(unsigned short))
 	{
-		unsigned short mark = ntohs( *(unsigned short*)packet );
+		unsigned short mark = ntohs(*(unsigned short*)session->msgbuf);
 
-		if( mark == 0xaaee && msglen >= sizeof(pkghead16) )
+		if(mark == 0xaaee && session->msglen >= sizeof(pkghead16))
 		{
 			// head16
-			pkghead16 head	= *(pkghead16*)msgbuf;
-			head.mark = ntohs( head.mark );
-			head.length = ntohs( head.length );
-			head.checksum = ntohs( head.checksum );
+			pkghead16 pkg = *(pkghead16*)packet;
+			pkg.mark = ntohs(pkg.mark);
+			pkg.len = ntohs(pkg.len);
+			pkg.chk = ntohs(pkg.chk);
 
-			if( msglen >= head.length )
+			if (session->msglen >= pkg.len + sizeof(pkghead16))
 			{
-				decode( msgbuf, head.length );
-				memmove( msgbuf, msgbuf + head.length + sizeof(pkghead16), msglen - head.length - sizeof(pkghead16) );
-				msglen = msglen - head.length - sizeof( head );
+				decode( packet + sizeof(pkghead16), pkg.len );
+				memmove(session->msgbuf, session->msgbuf + pkg.len + sizeof(pkghead16), session->msglen - pkg.len - sizeof(pkghead16));
+				session->msglen = session->msglen - pkg.len - sizeof(pkghead16);
 			}
 		}
-		else if( mark == 0xaaef )
+		else if (mark == 0xaaef && session->msglen >= sizeof(pkghead32))
 		{
 			// head32
-			pkghead32 head	= *(pkghead32*)msgbuf;
-			head.mark = ntohs( head.mark );
-			head.length = ntohl( head.length );
-			head.checksum = ntohs( head.checksum );
+			pkghead32 pkg	= *(pkghead32*)msgbuf;
+			pkg.mark = ntohs(pkg.mark);
+			pkg.len = ntohl(pkg.len);
+			pkg.chk = ntohs(pkg.chk);
 
-			if( msglen >= sizeof(head) + head.length )
+			if (session->msglen >= sizeof(pkghead32)+pkg.len)
 			{
-				decode( msgbuf + sizeof( head ), msglen - sizeof( head ) );
-				memmove( msgbuf, msgbuf + head.length + sizeof(head), msglen - head.length - sizeof(head) );
-				msglen = msglen - head.length - sizeof( head );
+				decode(session->msgbuf + sizeof(pkghead32), session->msglen - sizeof(pkghead32));
+				memmove(session->msgbuf, session->msgbuf + pkg.len + sizeof(pkghead32), session->msglen - pkg.len - sizeof(pkghead32));
+				session->msglen = session->msglen - pkg.len - sizeof(pkghead32);
 			}
 		}
 		else
@@ -387,5 +563,4 @@ void prase_msg( const char* packet, size_t size )
 
 	msg._class = ntohs( msg._class );
 	msg._message = ntohs( msg._message );
-
 }

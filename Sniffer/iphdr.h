@@ -5,49 +5,30 @@
 #include <ws2tcpip.h>
 #include <mstcpip.h>
 #include <inaddr.h>
+#define LITTLE_ENDIAN
 //
 // IPv4 Header (without any IP options)
 //
 typedef struct ip_hdr
 {
-    unsigned char  ip_verlen;        // 4-bit IPv4 version
-                                     // 4-bit header length (in 32-bit words)
-    unsigned char  ip_tos;           // IP type of service
-    unsigned short ip_totallength;   // Total length
-    unsigned short ip_id;            // Unique identifier 
-    unsigned short ip_offset;        // Fragment offset field
-    unsigned char  ip_ttl;           // Time to live
-    unsigned char  ip_protocol;      // Protocol(TCP,UDP etc)
-    unsigned short ip_checksum;      // IP checksum
-    unsigned int   ip_srcaddr;       // Source address
-    unsigned int   ip_dstaddr;		 // Source address
+	#if defined(LITTLE_ENDIAN)
+		unsigned char ihl : 4;     //首部长度  
+		unsigned char version : 4; //版本   
+	#else
+		unsigned char version : 4; //版本  
+		unsigned char ihl : 4;     //首部长度  
+	#endif
+
+    unsigned char  tos;				// IP type of service
+    unsigned short totlen;			// Total length
+    unsigned short id;				// Unique identifier 
+	unsigned short frag_off;        // Fragment offset field
+    unsigned char  ttl;				// Time to live
+    unsigned char  proto;			// Protocol(TCP,UDP etc)
+    unsigned short checksum;		// IP checksum
+    unsigned int   src_addr;			// Source address
+    unsigned int   dst_addr;			// Source address
 } IPV4_HDR, *PIPV4_HDR, FAR * LPIPV4_HDR;
-
-//
-// IPv6 Header
-//
-typedef struct ipv6_hdr
-{
-    unsigned long   ipv6_vertcflow;        // 4-bit IPv6 version
-                                           // 8-bit traffic class
-                                           // 20-bit flow label
-    unsigned short  ipv6_payloadlen;       // payload length
-    unsigned char   ipv6_nexthdr;          // next header protocol value
-    unsigned char   ipv6_hoplimit;         // TTL 
-    struct in6_addr ipv6_srcaddr;          // Source address
-    struct in6_addr ipv6_destaddr;         // Destination address
-} IPV6_HDR, *PIPV6_HDR, FAR * LPIPV6_HDR;
-
-//
-// IPv6 Fragmentation Header
-//
-typedef struct ipv6_fragment_hdr
-{
-    unsigned char   ipv6_frag_nexthdr;      // Next protocol header
-    unsigned char   ipv6_frag_reserved;     // Reserved: zero
-    unsigned short  ipv6_frag_offset;       // Offset of fragment
-    unsigned long   ipv6_frag_id;           // Unique fragment ID
-} IPV6_FRAGMENT_HDR, *PIPV6_FRAGMENT_HDR, FAR * LPIPV6_FRAGMENT_HDR;
 
 //
 // Define the UDP header 
@@ -63,17 +44,89 @@ typedef struct udp_hdr
 //
 // Define the TCP header
 //
-typedef struct tpc_hdr
+typedef struct _tcp_hdr
 {
-    unsigned short src_port;         // Source port no.
-    unsigned short dst_port;         // Dest. port no.
-    unsigned long  seq_num;          // Sequence number
-    unsigned long  ack_num;          // Acknowledgement number;
-    unsigned short lenflags;         // Header length and flags
-    unsigned short window_size;      // Window size
-    unsigned short tcp_checksum;     // Checksum
-    unsigned short tcp_urgentptr;    // Urgent data?
+	unsigned short src_port;    //源端口号  
+	unsigned short dst_port;    //目的端口号  
+	unsigned int seq_num;        //序列号  
+	unsigned int ack_num;        //确认号  
+	#if defined(LITTLE_ENDIAN)
+		unsigned char reserved_1 : 4; //保留6位中的4位首部长度  
+		unsigned char thl : 4;        //tcp头部长度  
+		unsigned char flag : 6;       //6位标志  
+		unsigned char reseverd_2 : 2; //保留6位中的2位  
+	#else
+		unsigned char thl : 4;        //tcp头部长度  
+		unsigned char reserved_1 : 4; //保留6位中的4位首部长度  
+		unsigned char reseverd_2 : 2; //保留6位中的2位  
+		unsigned char flag : 6;       //6位标志   
+	#endif
+	unsigned short wnd_size;    //16位窗口大小  
+	unsigned short chk_sum;     //16位TCP检验和  
+	unsigned short urgt_p;      //16为紧急指针  
 } TCP_HDR, *PTCP_HDR;
+
+typedef struct _peer
+{
+	unsigned int	addr;
+	unsigned short	port;
+}TCP_PEER, *PTCP_PEER;
+
+__inline bool operator < (const struct _peer& lhs, const struct _peer& rhs)
+{
+	return (lhs.addr < rhs.addr) ? true :
+		(lhs.addr == rhs.addr) ? (lhs.port < rhs.port) : 
+		false;
+}
+
+__inline bool operator > (const struct _peer& lhs, const struct _peer& rhs)
+{
+	return rhs < lhs;
+}
+
+__inline bool operator == (const struct _peer& lhs, const struct _peer& rhs)
+{
+	return lhs.addr == rhs.addr && lhs.port == rhs.port;
+}
+
+__inline bool operator != (const struct _peer& lhs, const struct _peer& rhs)
+{
+	return !(lhs == rhs);
+}
+
+typedef struct _tcp_connection
+{
+	TCP_PEER src;
+	TCP_PEER dst;
+}TCP_CONNECTION, PTCP_CONNECTION;
+
+__inline bool operator == (const struct _tcp_connection& lhs, const struct _tcp_connection& rhs)
+{
+	return lhs.src == rhs.src && lhs.dst == rhs.dst;
+}
+
+__inline bool operator != (const struct _tcp_connection& lhs, const struct _tcp_connection& rhs)
+{
+	return !(lhs == rhs);
+}
+
+typedef struct _tcp_unorder
+{
+	struct _tcp_unorder *next;
+	TCP_HDR			tcp;
+	unsigned int	len;
+	char			data[1];
+}TCP_UNORDER, *PTCP_UNORDER;
+
+typedef struct _tcp_session
+{
+	char state;
+	PTCP_UNORDER 	unorder_list;	// 未排序的
+	unsigned int	seq_num;		// 期望的seq
+
+	char	msgbuf[0xffff]; // msg buffer
+	size_t	msglen;
+}TCP_SESSION, *PTCP_SESSION;
 
 //
 // Stucture to extract port numbers that overlays the UDP and TCP header
@@ -125,39 +178,18 @@ typedef struct igmp_hdr_report_v3
     unsigned short  num_records;
 } IGMP_HDR_REPORT_V3, *PIGMP_HDR_REPORT_V3;
 
-typedef	unsigned int tcp_seq;
-/*
-* TCP header
-*/
-struct tcphdr
-{
-	unsigned short	th_sport;		/* source port */
-	unsigned short	th_dport;		/* destination port */
-	tcp_seq	th_seq;			/* sequence number */
-	tcp_seq	th_ack;			/* acknowledgement number */
-
-	unsigned char	th_off : 4,		/* data offset */
-	th_x2 : 4;		/* (unused) */
-
-	unsigned char	th_flags;
-
-	unsigned short	th_win;			/* window */
-	unsigned short	th_sum;			/* checksum */
-	unsigned short	th_urp;			/* urgent pointer */
-};
-
 struct pkghead16
 {
 	unsigned short mark;
-	unsigned short length;
-	unsigned short checksum;
+	unsigned short len;
+	unsigned short chk;
 };
 
 struct pkghead32
 {
-	unsigned short mark;
-	unsigned int length;
-	unsigned short checksum;
+	unsigned short	mark;
+	unsigned int	len;
+	unsigned short	chk;
 };
 
 struct data_header
@@ -185,8 +217,19 @@ struct msghead
 #define	TH_PUSH	0x08
 #define	TH_ACK	0x10
 #define	TH_URG	0x20
+
 #define TH_NETDEV        0x00000001
 #define TH_TAPI          0x00000002
+
+#define CLOSED		0
+#define SYN_SENT	1
+#define SYN_RECV	2
+#define ESTABLISHED 3
+#define FIN_WAIT_1	4
+#define FIN_WAIT_2	5
+#define CLOSE_WAIT	6
+#define TIME_WAIT	7
+#define LAST_ACK	8
 
 //
 // Size defines
